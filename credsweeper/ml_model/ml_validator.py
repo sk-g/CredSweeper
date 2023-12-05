@@ -5,6 +5,7 @@ from typing import List, Tuple, Union, Any
 
 import numpy as np
 import onnxruntime as ort
+import onnx
 
 from credsweeper.common.constants import ThresholdPreset
 from credsweeper.credentials import Candidate
@@ -12,6 +13,26 @@ from credsweeper.ml_model import features
 from credsweeper.utils import Util
 
 logger = logging.getLogger(__name__)
+
+
+class WrapInferenceSession:
+    """
+    InferenceSession is not pickleable therefore needs a workaround for enabling multiprocessing context.
+    Based on: https://github.com/microsoft/onnxruntime/pull/800#issuecomment-844326099
+    """
+    def __init__(self, onnx_bytes):
+        self.sess = ort.InferenceSession(onnx_bytes.SerializeToString())
+        self.onnx_bytes = onnx_bytes
+
+    def run(self, *args):
+        return self.sess.run(*args)
+
+    def __getstate__(self):
+        return {'onnx_bytes': self.onnx_bytes}
+
+    def __setstate__(self, values):
+        self.onnx_bytes = values['onnx_bytes']
+        self.sess = ort.InferenceSession(self.onnx_bytes.SerializeToString())
 
 
 class MlValidator:
@@ -25,13 +46,19 @@ class MlValidator:
         """
         dir_path = os.path.dirname(os.path.realpath(__file__))
         model_file_path = os.path.join(dir_path, "ml_model.onnx")
+        # Load ONNX model as bytes
+        with open(model_file_path, 'rb') as model_file:
+            onnx_model_bytes = model_file.read()
+        onnx_model = onnx.ModelProto.FromString(onnx_model_bytes)
         if azure:
             provider = "AzureExecutionProvider"
         elif cuda:
             provider = "CUDAExecutionProvider"
         else:
             provider = "CPUExecutionProvider"
-        self.model_session = ort.InferenceSession(model_file_path, providers=[provider])
+        # self.model_session = ort.InferenceSession(model_file_path, providers=[provider])
+        self.model_session = WrapInferenceSession(onnx_model)
+        self.model_session.sess.set_providers([provider])
         char_filtered = string.ascii_lowercase + string.digits + string.punctuation
 
         self.char_to_index = {char: index + 1 for index, char in enumerate(char_filtered)}
